@@ -16,6 +16,7 @@ export const env = {
 
   // slack
   SLACK_SIGNING_SECRET: required("SLACK_SIGNING_SECRET"),
+  SLACK_BOT_TOKEN: required("SLACK_BOT_TOKEN"),
 
   // app
   BASE_URL: required("BASE_URL"), // e.g. https://yourapp.com

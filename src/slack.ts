@@ -36,6 +36,34 @@ function verifySlackSignature(
   }
 }
 
+// fetch all members of a slack channel (handles pagination)
+async function getChannelMembers(channelId: string): Promise<string[]> {
+  const members: string[] = [];
+  let cursor: string | undefined;
+
+  do {
+    const params = new URLSearchParams({ channel: channelId, limit: "200" });
+    if (cursor) params.set("cursor", cursor);
+
+    const res = await fetch(`https://slack.com/api/conversations.members?${params}`, {
+      headers: { Authorization: `Bearer ${env.SLACK_BOT_TOKEN}` },
+    });
+    const data = (await res.json()) as {
+      ok: boolean;
+      members?: string[];
+      response_metadata?: { next_cursor?: string };
+      error?: string;
+    };
+
+    if (!data.ok) throw new Error(data.error || "failed to fetch channel members");
+
+    members.push(...(data.members || []));
+    cursor = data.response_metadata?.next_cursor || undefined;
+  } while (cursor);
+
+  return members;
+}
+
 // extract slack user ID from mention like <@U12345|username> or raw ID
 function parseUserMention(text: string): string | null {
   const match = text.match(/<@(U[A-Z0-9]+)(?:\|[^>]*)?>/);
@@ -94,13 +122,46 @@ slack.post("/slack/command", async (c) => {
       text: [
         "*usage:*",
         "`/docs whitelist add @user` — grant access",
+        "`/docs whitelist add channel` — whitelist everyone in this channel",
         "`/docs whitelist remove @user` — revoke access",
+        "`/docs whitelist remove channel` — remove everyone in this channel",
         "`/docs whitelist list` — show whitelisted users",
         "`/docs admin add @user` — grant admin",
         "`/docs admin remove @user` — revoke admin",
         "`/docs admin list` — show admins",
       ].join("\n"),
     });
+  }
+
+  // handle "whitelist add/remove channel"
+  if (group === "whitelist" && rest.trim().toLowerCase() === "channel") {
+    const channelId = params.get("channel_id");
+    if (!channelId) {
+      return c.json({ response_type: "ephemeral", text: "couldn't determine the channel." });
+    }
+
+    try {
+      const members = await getChannelMembers(channelId);
+      let count = 0;
+      for (const memberId of members) {
+        if (action === "add") {
+          if (addToWhitelist(memberId, userId)) count++;
+        } else {
+          if (removeFromWhitelist(memberId)) count++;
+        }
+      }
+      const verb = action === "add" ? "added" : "removed";
+      return c.json({
+        response_type: "ephemeral",
+        text: `${verb} ${count} user${count === 1 ? "" : "s"} (out of ${members.length} in this channel) ${action === "add" ? "to" : "from"} the whitelist.`,
+      });
+    } catch (err) {
+      console.error("failed to fetch channel members:", err);
+      return c.json({
+        response_type: "ephemeral",
+        text: "failed to fetch channel members. make sure the bot is in this channel.",
+      });
+    }
   }
 
   const targetId = parseUserMention(rest);
