@@ -64,9 +64,8 @@ auth.get("/callback", async (c) => {
     return c.text("failed to get user info", 500);
   }
 
-  const me = (await meRes.json()) as Record<string, unknown>;
-  console.log("hack club auth /me response:", JSON.stringify(me));
-  const slackId = (me.slack_id ?? me.slackId ?? me.slack) as string | undefined;
+  const me = (await meRes.json()) as { identity?: { slack_id?: string } };
+  const slackId = me.identity?.slack_id;
 
   if (!slackId) {
     return c.html(
