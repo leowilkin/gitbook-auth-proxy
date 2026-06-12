@@ -5,6 +5,38 @@ import { isWhitelisted } from "./db.js";
 
 const auth = new Hono();
 
+// build the post-auth redirect back to gitbook, attaching the signed jwt as a
+// proper query param. `location` is usually a bare docs path, but in gitbook's
+// MCP oauth flow it's a full authorize-resume URL that already carries its own
+// query string (?gb_oauth_state=...). naive concat produced a second "?", so
+// gitbook never saw jwt_token and the exchange failed with unsupported_grant_type.
+function buildGitbookRedirect(location: string, jwt: string): string {
+  const docsHost = new URL(env.GITBOOK_DOCS_URL).host;
+
+  let base: URL;
+  if (/^https?:\/\//i.test(location)) {
+    base = new URL(location);
+    // only ever hand the jwt to gitbook-controlled hosts — otherwise a crafted
+    // `?location=https://evil.com` could exfiltrate a valid signing token.
+    const host = base.host;
+    const trusted =
+      host === docsHost ||
+      host === "sites.gitbook.com" ||
+      host.endsWith(".gitbook.com") ||
+      host.endsWith(".gitbook.io");
+    if (!trusted) {
+      throw new Error(`refusing to redirect jwt to untrusted host: ${host}`);
+    }
+  } else {
+    base = new URL(
+      location ? `${env.GITBOOK_DOCS_URL}/${location}` : env.GITBOOK_DOCS_URL,
+    );
+  }
+
+  base.searchParams.set("jwt_token", jwt);
+  return base.toString();
+}
+
 // Step 1: GitBook redirects unauthenticated users here
 auth.get("/login", (c) => {
   const location = c.req.query("location") || "";
@@ -97,11 +129,7 @@ auth.get("/callback", async (c) => {
     .sign(new TextEncoder().encode(env.GITBOOK_SIGNING_KEY));
 
   // redirect back to gitbook with the JWT
-  const redirectUrl = location
-    ? `${env.GITBOOK_DOCS_URL}/${location}?jwt_token=${gitbookJwt}`
-    : `${env.GITBOOK_DOCS_URL}?jwt_token=${gitbookJwt}`;
-
-  return c.redirect(redirectUrl);
+  return c.redirect(buildGitbookRedirect(location, gitbookJwt));
 });
 
 export default auth;
