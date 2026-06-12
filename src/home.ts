@@ -128,6 +128,36 @@ function buildHomeView(viewerId: string) {
     }
   }
 
+  // slash command reference — the buttons above cover everything, but the
+  // /docs commands work anywhere in slack (and channel sync is command-only).
+  if (admin) {
+    blocks.push({ type: "divider" });
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: [
+          "*Slash commands* — `/docs ...` works in any channel:",
+          "`whitelist add @user` · `whitelist remove @user` · `whitelist list`",
+          "`whitelist add channel` · `whitelist remove channel` — sync everyone in a channel",
+          "`admin add @user` · `admin remove @user` · `admin list`",
+          "`group add <name> @user` · `group remove <name> @user`",
+          "`group add <name> channel` · `group remove <name> channel` — sync a channel into a group",
+          "`group list` · `group list <name>`",
+        ].join("\n"),
+      },
+    });
+    blocks.push({
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: "channel sync (`... channel`) is only available as a slash command — run it inside the target channel.",
+        },
+      ],
+    });
+  }
+
   return { type: "home", blocks };
 }
 
