@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import * as jose from "jose";
 import { env } from "./env.js";
-import { isWhitelisted } from "./db.js";
+import { isWhitelisted, getGroupsForUser } from "./db.js";
 
 const auth = new Hono();
 
@@ -121,8 +121,16 @@ auth.get("/callback", async (c) => {
     );
   }
 
+  // build adaptive-content claims: each group the user belongs to becomes a
+  // boolean claim (e.g. { fulltime: true }), which gitbook reads as
+  // visitor.claims.fulltime for per-section visibility conditions.
+  const claims: Record<string, boolean> = {};
+  for (const group of getGroupsForUser(slackId)) {
+    claims[group] = true;
+  }
+
   // sign gitbook JWT
-  const gitbookJwt = await new jose.SignJWT({})
+  const gitbookJwt = await new jose.SignJWT(claims)
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime("2h")

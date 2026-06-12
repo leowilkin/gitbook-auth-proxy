@@ -3,6 +3,7 @@ import { serve } from "@hono/node-server";
 import { env } from "./env.js";
 import auth from "./auth.js";
 import slack from "./slack.js";
+import home from "./home.js";
 import { isAdmin, addAdmin, adminCount } from "./db.js";
 
 const app = new Hono();
@@ -21,6 +22,9 @@ app.route("/", auth);
 
 // slack slash command
 app.route("/", slack);
+
+// slack app home (events + interactivity)
+app.route("/", home);
 
 serve({ fetch: app.fetch, port: env.PORT }, (info) => {
   console.log(`gitbook-auth-proxy running on port ${info.port}`);

@@ -1,6 +1,9 @@
 import { Hono } from "hono";
-import { createHmac, timingSafeEqual } from "node:crypto";
-import { env } from "./env.js";
+import {
+  verifySlackSignature,
+  getChannelMembers,
+  parseUserMention,
+} from "./slackUtil.js";
 import {
   isAdmin,
   addAdmin,
@@ -10,75 +13,21 @@ import {
   listWhitelist,
   listAdmins,
   adminCount,
+  normalizeGroupName,
+  addToGroup,
+  removeFromGroup,
+  listGroupMembers,
+  listGroups,
 } from "./db.js";
 
 const slack = new Hono();
-
-// verify slack request signature
-function verifySlackSignature(
-  signingSecret: string,
-  signature: string,
-  timestamp: string,
-  body: string,
-): boolean {
-  // reject requests older than 5 minutes
-  const now = Math.floor(Date.now() / 1000);
-  if (Math.abs(now - parseInt(timestamp)) > 300) return false;
-
-  const baseString = `v0:${timestamp}:${body}`;
-  const hmac = createHmac("sha256", signingSecret).update(baseString).digest("hex");
-  const expected = `v0=${hmac}`;
-
-  try {
-    return timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
-  } catch {
-    return false;
-  }
-}
-
-// fetch all members of a slack channel (handles pagination)
-async function getChannelMembers(channelId: string): Promise<string[]> {
-  const members: string[] = [];
-  let cursor: string | undefined;
-
-  do {
-    const params = new URLSearchParams({ channel: channelId, limit: "200" });
-    if (cursor) params.set("cursor", cursor);
-
-    const res = await fetch(`https://slack.com/api/conversations.members?${params}`, {
-      headers: { Authorization: `Bearer ${env.SLACK_BOT_TOKEN}` },
-    });
-    const data = (await res.json()) as {
-      ok: boolean;
-      members?: string[];
-      response_metadata?: { next_cursor?: string };
-      error?: string;
-    };
-
-    if (!data.ok) throw new Error(data.error || "failed to fetch channel members");
-
-    members.push(...(data.members || []));
-    cursor = data.response_metadata?.next_cursor || undefined;
-  } while (cursor);
-
-  return members;
-}
-
-// extract slack user ID from mention like <@U12345|username> or raw ID
-function parseUserMention(text: string): string | null {
-  const match = text.match(/<@(U[A-Z0-9]+)(?:\|[^>]*)?>/);
-  if (match) return match[1];
-  // also accept raw slack IDs
-  const rawMatch = text.match(/\b(U[A-Z0-9]{8,})\b/);
-  return rawMatch ? rawMatch[1] : null;
-}
 
 slack.post("/slack/command", async (c) => {
   const rawBody = await c.req.text();
   const timestamp = c.req.header("x-slack-request-timestamp") || "";
   const signature = c.req.header("x-slack-signature") || "";
 
-  if (!verifySlackSignature(env.SLACK_SIGNING_SECRET, signature, timestamp, rawBody)) {
+  if (!verifySlackSignature(signature, timestamp, rawBody)) {
     return c.json({ error: "invalid signature" }, 401);
   }
 
@@ -115,6 +64,111 @@ slack.post("/slack/command", async (c) => {
     return c.json({ response_type: "ephemeral", text: `*admins:*\n${formatted}` });
   }
 
+  // group membership powers gitbook adaptive content. syntax differs from
+  // whitelist/admin because it carries an extra <name> token:
+  //   /docs group add <name> @user | channel
+  //   /docs group remove <name> @user | channel
+  //   /docs group list            — all groups + member counts
+  //   /docs group list <name>     — members of a group
+  if (group === "group") {
+    const rawName = parts[2] || "";
+    const groupTarget = parts.slice(3).join(" ").trim();
+
+    if (action === "list") {
+      if (!rawName) {
+        const groups = listGroups();
+        if (groups.length === 0) {
+          return c.json({ response_type: "ephemeral", text: "no groups defined yet." });
+        }
+        const formatted = groups
+          .map((g) => `• \`${g.group_name}\` — ${g.count} member${g.count === 1 ? "" : "s"}`)
+          .join("\n");
+        return c.json({ response_type: "ephemeral", text: `*groups:*\n${formatted}` });
+      }
+      const name = normalizeGroupName(rawName);
+      const members = listGroupMembers(name);
+      if (members.length === 0) {
+        return c.json({ response_type: "ephemeral", text: `group \`${name}\` is empty.` });
+      }
+      const formatted = members.map((id) => `• <@${id}>`).join("\n");
+      return c.json({
+        response_type: "ephemeral",
+        text: `*members of \`${name}\`:*\n${formatted}`,
+      });
+    }
+
+    if ((action === "add" || action === "remove") && rawName) {
+      const name = normalizeGroupName(rawName);
+
+      // sync a whole channel into / out of the group
+      if (groupTarget.toLowerCase() === "channel") {
+        const channelId = params.get("channel_id");
+        if (!channelId) {
+          return c.json({ response_type: "ephemeral", text: "couldn't determine the channel." });
+        }
+        try {
+          const members = await getChannelMembers(channelId);
+          let count = 0;
+          for (const memberId of members) {
+            if (action === "add") {
+              if (addToGroup(memberId, name, userId)) count++;
+            } else {
+              if (removeFromGroup(memberId, name)) count++;
+            }
+          }
+          const verb = action === "add" ? "added" : "removed";
+          return c.json({
+            response_type: "ephemeral",
+            text: `${verb} ${count} user${count === 1 ? "" : "s"} (out of ${members.length} in this channel) ${action === "add" ? "to" : "from"} group \`${name}\`.`,
+          });
+        } catch (err) {
+          console.error("failed to fetch channel members:", err);
+          return c.json({
+            response_type: "ephemeral",
+            text: "failed to fetch channel members. make sure the bot is in this channel.",
+          });
+        }
+      }
+
+      const memberId = parseUserMention(groupTarget);
+      if (!memberId) {
+        return c.json({
+          response_type: "ephemeral",
+          text: "couldn't find a user mention. use `/docs group add <name> @user`.",
+        });
+      }
+      if (action === "add") {
+        const ok = addToGroup(memberId, name, userId);
+        return c.json({
+          response_type: "ephemeral",
+          text: ok
+            ? `added <@${memberId}> to group \`${name}\`.`
+            : `<@${memberId}> is already in group \`${name}\`.`,
+        });
+      }
+      const ok = removeFromGroup(memberId, name);
+      return c.json({
+        response_type: "ephemeral",
+        text: ok
+          ? `removed <@${memberId}> from group \`${name}\`.`
+          : `<@${memberId}> wasn't in group \`${name}\`.`,
+      });
+    }
+
+    return c.json({
+      response_type: "ephemeral",
+      text: [
+        "*group usage:*",
+        "`/docs group add <name> @user` — add user to a group",
+        "`/docs group add <name> channel` — add everyone in this channel",
+        "`/docs group remove <name> @user` — remove user from a group",
+        "`/docs group remove <name> channel` — remove everyone in this channel",
+        "`/docs group list` — show all groups",
+        "`/docs group list <name>` — show members of a group",
+      ].join("\n"),
+    });
+  }
+
   // for add/remove we need a target user
   if (!["whitelist", "admin"].includes(group) || !["add", "remove"].includes(action)) {
     return c.json({
@@ -129,6 +183,9 @@ slack.post("/slack/command", async (c) => {
         "`/docs admin add @user` — grant admin",
         "`/docs admin remove @user` — revoke admin",
         "`/docs admin list` — show admins",
+        "`/docs group add <name> @user` — add to an adaptive-content group",
+        "`/docs group add <name> channel` — add this channel to a group",
+        "`/docs group list` — show groups",
       ].join("\n"),
     });
   }

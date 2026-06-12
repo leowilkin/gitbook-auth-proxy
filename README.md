@@ -62,6 +62,56 @@ all commands require admin access:
 | `/docs admin add @user` | grant admin privileges |
 | `/docs admin remove @user` | revoke admin privileges |
 | `/docs admin list` | show all admins |
+| `/docs group add <name> @user` | add a user to an adaptive-content group |
+| `/docs group add <name> channel` | add everyone in this channel to a group |
+| `/docs group remove <name> @user` | remove a user from a group |
+| `/docs group remove <name> channel` | remove everyone in this channel from a group |
+| `/docs group list` | show all groups and member counts |
+| `/docs group list <name>` | show members of a group |
+
+## app home (interactive UI)
+
+admins can manage everything from the bot's **Home tab** in slack instead of typing
+slash commands — it shows the whitelist count, admins, and groups, with buttons that
+open pickers to manage them. you can create, rename (with a description), and delete
+groups, and add/remove members via dropdown — all without leaving slack. non-admins
+see a read-only summary.
+
+to enable it in your slack app config (https://api.slack.com/apps):
+
+1. **App Home** → turn on the **Home Tab**.
+2. **Interactivity & Shortcuts** → turn on interactivity, set request URL to
+   `https://yourapp.com/slack/interactivity`.
+3. **Event Subscriptions** → enable events, set request URL to
+   `https://yourapp.com/slack/events` (slack will verify it with a challenge — the
+   service answers automatically), then subscribe to the bot event `app_home_opened`.
+4. **OAuth & Permissions** → ensure the bot has `conversations.members` access
+   (`channels:read` / `groups:read`) for channel sync; reinstall the app if you
+   changed scopes.
+
+then open the bot from your slack sidebar → **Home** tab.
+
+## adaptive content (per-section access)
+
+the whitelist gates the whole site. to gate individual sections/pages to a subset
+of users (e.g. only full-time HQ staff see the employee handbook), use gitbook's
+[adaptive content](https://gitbook.com/docs/site-access/adaptive-content) on top.
+
+how it works: each **group** a user belongs to is signed into their gitbook JWT as
+a boolean claim. group `fulltime` → `visitor.claims.fulltime == true`.
+
+setup:
+
+1. create a group and add members, e.g. `/docs group add fulltime channel` while in
+   your `#hq-fulltime` channel (members must also be whitelisted to access the site
+   at all).
+2. in gitbook → **Settings → Audience**, enable adaptive content and define a boolean
+   claim per group name you use (e.g. `fulltime`, `finance`).
+3. on the section/page, set visibility to a condition like
+   `visitor.claims.fulltime == true`.
+
+group membership is a snapshot — re-run `/docs group add <name> channel` to re-sync
+after people join or leave the channel. claims refresh on each login (JWTs last 2h).
 
 ## env vars
 
