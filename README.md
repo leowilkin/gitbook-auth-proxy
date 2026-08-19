@@ -12,6 +12,29 @@ authenticated access proxy for gitbook using hack club auth + slack-managed whit
 
 admins manage the whitelist via a slack slash command (`/docs`).
 
+## signing out
+
+`/logout` ends a docs session and drops the visitor at a login wall:
+
+1. `/logout` redirects to `<site>/~gitbook/auth/logout`, which deletes gitbook's
+   `gitbook-visitor-token` cookie (the docs session lives entirely there — this
+   service keeps no session of its own)
+2. gitbook redirects back to the logout URL configured on the site, which must be
+   `https://yourapp.com/logout?signed_out=1` — the marker tells us the cookie is
+   gone, so we serve the login wall instead of bouncing to gitbook again
+3. the wall's "sign in" button returns to `/login`, carrying the `location`
+   gitbook passed through, so signing back in lands on the same page
+
+link `<publishedSiteURL>/~gitbook/auth/logout` (or `https://yourapp.com/logout`)
+from your docs to give readers a sign-out link.
+
+**switching hack club auth accounts:** signing out of the docs doesn't sign you out
+of hack club auth — it keeps its own session, and it has no logout URL we can send
+you to (it's a CSRF-protected `DELETE`, and `/oauth/authorize` ignores
+`prompt=login`). so hitting "sign in" again silently re-authenticates you as the
+same person. the login wall links to <https://auth.hackclub.com> where you can log
+out yourself; do that first, then sign in to come back as a different account.
+
 ## setup
 
 ### 1. hack club auth
@@ -24,6 +47,16 @@ admins manage the whitelist via a slack slash command (`/docs`).
 
 - enable authenticated access on your gitbook site
 - set the fallback URL to `https://yourapp.com/login`
+- set the logout URL to `https://yourapp.com/logout?signed_out=1` — needed for
+  `/logout` to land on the login wall (see [signing out](#signing-out)). if the
+  audience settings don't expose the field, set it over the api:
+
+  ```bash
+  curl -X PATCH "https://api.gitbook.com/v1/orgs/$ORG_ID/sites/$SITE_ID/publishing/auth" \
+    -H "Authorization: Bearer $GITBOOK_API_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"backend":"custom","logoutURL":"https://yourapp.com/logout?signed_out=1"}'
+  ```
 - copy the signing key
 
 ### 3. slack app
