@@ -28,8 +28,9 @@ function buildGitbookRedirect(location: string, jwt: string): string {
       throw new Error(`refusing to redirect jwt to untrusted host: ${host}`);
     }
   } else {
+    const path = location.replace(/^\/+/, "");
     base = new URL(
-      location ? `${env.GITBOOK_DOCS_URL}/${location}` : env.GITBOOK_DOCS_URL,
+      path ? `${env.GITBOOK_DOCS_URL}/${path}` : env.GITBOOK_DOCS_URL,
     );
   }
 
@@ -138,6 +139,70 @@ auth.get("/callback", async (c) => {
 
   // redirect back to gitbook with the JWT
   return c.redirect(buildGitbookRedirect(location, gitbookJwt));
+});
+
+// where a signed-out visitor goes to end their hack club auth session. HCA has no
+// logout we can link to (it's a CSRF-protected DELETE /logout on their dashboard) and
+// its /oauth/authorize ignores `prompt=login`, so we can't force a re-auth from here
+// — the best we can do is send people there to log out themselves before signing
+// back in as someone else.
+const HC_AUTH_URL = "https://auth.hackclub.com/";
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// the login wall shown after the docs session has been dropped. `location` is the
+// page the visitor was on, carried through so signing back in returns them there.
+function loginWall(location: string): string {
+  const href = `/login${location ? `?location=${encodeURIComponent(location)}` : ""}`;
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>signed out</title>
+</head>
+<body style="font-family:system-ui,-apple-system,sans-serif;max-width:26rem;margin:20vh auto;padding:0 1.5rem;line-height:1.5;color:#1a1a1a">
+  <h2 style="margin:0 0 .5rem">you're signed out</h2>
+  <p style="margin:0 0 1.5rem;color:#555">your docs session has ended. sign in with hack club auth to read the docs again.</p>
+  <a href="${escapeHtml(href)}" style="display:block;text-align:center;background:#ec3750;color:#fff;text-decoration:none;font-weight:600;padding:.75rem 1rem;border-radius:.5rem">sign in</a>
+  <p style="margin:1.5rem 0 0;font-size:.875rem;color:#777">
+    want a different account? hack club auth keeps you logged in separately —
+    <a href="${HC_AUTH_URL}" target="_blank" rel="noopener" style="color:#ec3750">log out there</a>
+    first, then sign in above.
+  </p>
+</body>
+</html>`;
+}
+
+// Sign out. The proxy is stateless — the docs session lives entirely in gitbook's
+// own `gitbook-visitor-token` cookie — so signing out is a two-hop bounce:
+//
+//   1. we redirect to <site>/~gitbook/auth/logout, which deletes that cookie
+//   2. gitbook redirects back to the logout URL configured on the site, which
+//      should be this route with `?signed_out=1` (see README), and we serve the
+//      login wall
+//
+// without the marker we'd re-enter step 1 forever, and going straight to the wall
+// would leave the visitor still signed in to gitbook.
+auth.get("/logout", (c) => {
+  const location = c.req.query("location") || "";
+
+  if (!c.req.query("signed_out")) {
+    const url = new URL(
+      `${env.GITBOOK_DOCS_URL.replace(/\/$/, "")}/~gitbook/auth/logout`,
+    );
+    if (location) url.searchParams.set("location", location);
+    return c.redirect(url.toString());
+  }
+
+  return c.html(loginWall(location));
 });
 
 export default auth;
